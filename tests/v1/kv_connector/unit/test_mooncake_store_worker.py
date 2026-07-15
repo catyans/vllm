@@ -1527,6 +1527,53 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
 
+def test_store_sending_thread_kv_events_exclude_failed_puts():
+    from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [-5, 256]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    hashes = [b"a0", b"a1"]
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", hashes))
+
+    events = thread.get_kv_events()
+    assert len(events) == 1
+    assert events[0].block_hashes == [maybe_convert_block_hash(BlockHash(hashes[1]))]
+    # The first block failed, so the successful suffix must not advertise the
+    # failed hash as its parent.
+    assert events[0].parent_block_hash is None
+
+
+def test_store_sending_thread_kv_events_empty_when_put_raises():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.side_effect = RuntimeError("rdma error")
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert thread.get_kv_events() == []
+
+
+def test_store_sending_thread_kv_events_empty_for_malformed_put_result():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = []
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert thread.get_kv_events() == []
+
+
 def _auto_set_ready_event(*args, **kwargs):
     """Side effect for mocked thread constructors that auto-sets ready_event."""
     for arg in args:
